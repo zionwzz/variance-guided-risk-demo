@@ -1,0 +1,19 @@
+# R
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+.Rproj.user/*
+*.Rproj
+
+# macOS
+.DS_Store
+
+# renv
+renv/library/
+renv/staging/
+.Rprofile
+
+# outputs (keep placeholder)
+outputs/*
+!outputs/.gitkeep

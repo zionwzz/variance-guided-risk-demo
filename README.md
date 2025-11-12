@@ -37,7 +37,7 @@ install.packages(c("ggplot2","dplyr","tidyr"))
 ```bash
 Rscript scripts/demo_algorithm.R
 ```
-This simulates one scenario via `simulate_scenario_smallT()`, fits the **variance-guided** model once (`use_x_in_variance = TRUE`), predicts \hat{μ}, \hat{σ}, computes exceedance risk at a pooled 90th-percentile cutoff, and writes two PNGs to `outputs/`.
+This simulates one scenario via `simulate_scenario_smallT()`, fits the **variance-guided** model once (`use_x_in_variance = TRUE`), predicts $\hat{μ}$, $\hat{σ}$, computes exceedance risk at a pooled 90th-percentile cutoff, and writes two PNGs to `outputs/`.
 
 **Reproduce main simulation figures (longer):**
 ```bash
@@ -47,7 +47,7 @@ This regenerates RMSE/Bias boxplots for `T ∈ {120, 240}` across scenarios and 
 
 ---
 
-## Order notation (paper vs. code)
+## Order notation
 
 We use **(P,Q,L,R)** in the paper and **(p,q,r,s_ord)** in code:
 
@@ -58,13 +58,6 @@ We use **(P,Q,L,R)** in the paper and **(p,q,r,s_ord)** in code:
 
 **Design choice: shared lag structure for X (Q = K).**  
 In this implementation we adopt a single lag structure for exogenous predictors across the mean and variance equations, i.e., the variance uses the same X-lag block as the mean (**Q = K**). This yields a parsimonious parameterization, reduces tuning burden, and stabilizes estimation when T is modest—features that are well aligned with wearable-sensor panel settings.
-
-A compact sketch (for reference):
-```
-μ_{s,t}  = α_s + Σ_{i=1..P} φ_i y_{s,t-i} + Σ_{j=0..Q} X_{s,t-j}^T β_j
-σ^2_{s,t}= ω_s + Σ_{i=1..L} a_i e_{s,t-i}^2 + Σ_{j=1..R} b_j σ^2_{s,t-j}
-           + Σ_{j=0..Q} X_{s,t-j}^T γ_j    (shared X-lag block; Q = K)
-```
 
 ---
 

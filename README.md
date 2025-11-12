@@ -47,24 +47,24 @@ This regenerates RMSE/Bias boxplots for `T ∈ {120, 240}` across scenarios and 
 
 ---
 
-## Order notation (paper vs. code) and current limitation for K
+## Order notation (paper vs. code)
 
 We use **(P,Q,L,R)** in the paper and **(p,q,r,s_ord)** in code:
 
 - **P ↔ p**: AR order in the **mean** (lags of y)  
 - **Q ↔ q**: distributed-lag order for **exogenous X** in the mean  
-- **L ↔ r**: ARCH order in the **variance** (lags of e^2)  
-- **R ↔ s_ord**: GARCH order in the **variance** (lags of σ^2)
+- **L ↔ r**: ARCH order in the **variance** (lags of e²)  
+- **R ↔ s_ord**: GARCH order in the **variance** (lags of σ²)
 
-A compact sketch (for reference only):
-```
-μ_{s,t} = α_s + Σ_{i=1..P} φ_i y_{s,t-i} + Σ_{j=0..Q} X_{s,t-j}^T β_j
-σ^2_{s,t} = ω_s + Σ_{i=1..L} a_i e_{s,t-i}^2 + Σ_{j=1..R} b_j σ^2_{s,t-j}
-            + X_{s,t}^T γ   (if use_x_in_variance = TRUE)
-```
+**Design choice: shared lag structure for X (Q = K).**  
+In this implementation we adopt a single lag structure for exogenous predictors across the mean and variance equations, i.e., the variance uses the same X-lag block as the mean (**Q = K**). This yields a parsimonious parameterization, reduces tuning burden, and stabilizes estimation when T is modest—features that are well aligned with wearable-sensor panel settings.
 
-> **Implementation note on the variance-lag K:**  
-> The current implementation does **not** expose a separate variance lag order **K** for the exogenous regressors. The variance equation reuses the **same X columns** as the mean. Practically, that ties K to whatever X-lag structure you include in your design matrix for the mean. If you include only contemporaneous X, this behaves like K = 0; if you include lags up to Q in your X design, the variance sees those same lags.
+A compact sketch (for reference):
+```
+μ_{s,t}  = α_s + Σ_{i=1..P} φ_i y_{s,t-i} + Σ_{j=0..Q} X_{s,t-j}^T β_j
+σ^2_{s,t}= ω_s + Σ_{i=1..L} a_i e_{s,t-i}^2 + Σ_{j=1..R} b_j σ^2_{s,t-j}
+           + Σ_{j=0..Q} X_{s,t-j}^T γ_j    (shared X-lag block; Q = K)
+```
 
 ---
 
@@ -77,6 +77,7 @@ Your data frame should include `s` (subject id), `t` (time), `y` (outcome), and 
 source("R/temporalVarGuid1.r")
 
 # Example mapping: paper (P,Q,L,R) = (1,0,1,1)  ↔  code (p,q,r,s_ord) = (1,0,1,1)
+# (Design choice here uses a shared X-lag block across mean & variance; Q = K.)
 fit <- lmvt(
   df,
   p = 1, q = 0, r = 1, s_ord = 1,

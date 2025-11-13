@@ -1,4 +1,4 @@
-# Variance-Guided Risk (ARX–GARCHX)
+# Variance-Aware Penalized Panel Modeling for Individualized Risk Prediction from Wearable Sensor Data
 
 Minimal, reproducible code for a variance-guided mean–variance model with autoregressive dynamics. The repo includes:
 - a **fast demo** (single scenario, single fit), and

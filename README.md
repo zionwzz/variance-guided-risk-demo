@@ -88,55 +88,85 @@ This script:
 
 ### Model Orders
 
-The `lmvt()` function specifies the panel model using four order parameters:
+The `lmvt()` function specifies the panel model using four order parameters **(p, q, r, s_ord)**:
 
 | Parameter | Description |
 |-----------|-------------|
 | **p** | Autoregressive order in the **mean** (lags of $y$) |
 | **q** | Distributed-lag order for exogenous predictors $x$ (in mean and variance) |
-| **r** | ARCH order in the **variance** (lags of $\varepsilon^2$) |
+| **r** | ARCH order in the **variance** (lags of squared residuals $e^2$) |
 | **s_ord** | GARCH order in the **variance** (lags of $\sigma^2$) |
+
+**Note:** When `use_x_in_variance = TRUE`, the same lag order `q` is used for covariates in both the mean and variance equations.
 
 ### Model Decomposition
 
 Let $y_{st}$ be the outcome for subject $s$ at time $t$. The model decomposes as:
 
-$$y_{st} = \mu_{st} + \varepsilon_{st}$$
+$$y_{st} = \mu_{st} + \sigma_{st}\,\varepsilon_{st}$$
 
 where:
-- $\mathbb{E}(\varepsilon_{st} \mid \mathcal{F}_{t-1}) = 0$
-- $\text{Var}(\varepsilon_{st} \mid \mathcal{F}_{t-1}) = \sigma_{st}^2$
+- $\mathbb{E}(\varepsilon_{st} \mid x_{st}, \mathcal{F}_{t-1}) = 0$
+- $\mathrm{Var}(\varepsilon_{st} \mid x_{st}, \mathcal{F}_{t-1}) = 1$ (standardized innovations)
 - $\mathcal{F}_{t-1}$ is the information set up to time $t-1$
+- $\mu_{st}$ is the conditional mean
+- $\sigma_{st}$ is the conditional standard deviation
 
-### Mean Equation (orders p, q)
+### Mean Equation (ARX: orders p, q)
 
-The conditional mean with subject-specific intercepts $\alpha_s$, shared AR coefficients $\phi_i$, and distributed-lag effects $\beta_j$:
+The conditional mean with subject-specific intercepts $\alpha_s$, shared AR coefficients $\theta_i$, and distributed-lag effects $\beta_j$:
 
-$$\mu_{st} = \alpha_s + \sum_{i=1}^{p} \phi_i\, y_{s,t-i} + \sum_{j=0}^{q} x_{s,t-j}^\top \beta_j$$
+$$\mu_{st} = \alpha_s + \sum_{i=1}^{p} \theta_i\, y_{s,t-i} + \sum_{j=0}^{q} x_{s,t-j}^\top \beta_j$$
 
 where:
 - $x_{s,t-j}$ is the vector of exogenous predictors for subject $s$ at time $t-j$
 - Coefficients $\{\beta_j\}$ are estimated under an $\ell_1$-penalty controlled by `lambda_beta`
+- The response follows: $y_{st} = \mu_{st} + \sigma_{st}\varepsilon_{st}$
 
-### Variance Equation (orders r, s_ord)
+### Variance Equation (GARCH-X: orders s_ord, r, q)
 
-The conditional variance $\sigma_{st}^2 = \text{Var}(y_{st} \mid \mathcal{F}_{t-1})$ follows:
+Define the residuals $e_{st} := y_{st} - \mu_{st} = \sigma_{st}\varepsilon_{st}$. The **pure GARCH(s_ord, r)** component is:
 
-$$\sigma_{st}^2 = \omega_s + \sum_{\ell=1}^{r} a_\ell\, \varepsilon_{s,t-\ell}^2 + \sum_{m=1}^{s_{\text{ord}}} b_m\, \sigma_{s,t-m}^2 + \mathbf{1}_{\{\text{use\_x\_in\_variance = TRUE}\}} \sum_{j=0}^{q} x_{s,t-j}^\top \gamma_j$$
+```math
+\delta_{st} := \omega_s + \sum_{\ell=1}^{s_{\text{ord}}} b_\ell\, \sigma_{s,t-\ell}^2 + \sum_{r'=1}^{r} a_{r'}\, e_{s,t-r'}^2
+```
+
+with constraints $\omega_s > 0$, $a_{r'} \geq 0$, $b_\ell \geq 0$ for positivity.
+
+The **GARCH-X variance** augments this with lagged covariates:
+
+```math
+\sigma_{st}^2 = \delta_{st} + \sum_{m=0}^{q} x_{s,t-m}^\top \gamma_m
+```
 
 where:
 - $\omega_s$ is a subject-specific baseline variance
-- $\{a_\ell\}$ are ARCH parameters (effects of squared innovations)
-- $\{b_m\}$ are GARCH parameters (effects of lagged variance)
-- $\{\gamma_j\}$ are covariate effects in the variance, penalized by `lambda_gamma`
+- $\{b_\ell\}$ are GARCH parameters (effects of lagged variance $\sigma^2$)
+- $\{a_{r'}\}$ are ARCH parameters (effects of squared residuals $e^2$)
+- $\{\gamma_m\}$ are covariate effects in the variance, penalized by `lambda_gamma`
+
+**Implementation note:** When `use_x_in_variance = TRUE`, covariates enter the variance equation with the same lag structure as the mean equation. To ensure $\sigma_{st}^2 > 0$, the implementation enforces non-negativity constraints and projects the linear predictor to a positive set when needed.
+
+### Parameter Structure: Shared vs. Subject-Specific
+
+**Subject-specific parameters:**
+- $\alpha_s$ — intercept in the mean equation
+- $\omega_s$ — baseline variance
+
+**Shared population parameters:**
+- $\{\theta_i\}$ — autoregressive coefficients
+- $\{\beta_j\}$ — covariate effects in mean
+- $\{\gamma_m\}$ — covariate effects in variance
+- $\{a_{r'}\}$ — ARCH coefficients
+- $\{b_\ell\}$ — GARCH coefficients
 
 ### Design Philosophy
 
-**Shared lag structure for covariates:** When `use_x_in_variance = TRUE`, the same lag block of exogenous predictors $(x_{s,t}, \ldots, x_{s,t-q})$ appears in both mean and variance equations. This design choice:
+**Shared lag structure for covariates:** When `use_x_in_variance = TRUE`, the same lag block of exogenous predictors $(x_{st}, x_{s,t-1}, \ldots, x_{s,t-q})$ appears in both mean and variance equations. This design choice:
 - Reduces the number of tuning parameters
 - Provides a parsimonious parameterization
-- Improves stability when $T$ is modest
-- Aligns well with wearable-sensor panel settings
+- Improves estimation stability when $T$ is modest
+- Aligns well with wearable-sensor panel settings where temporal dynamics are similar across equations
 
 ---
 
@@ -156,15 +186,15 @@ Your data frame should include:
 # Load the model code
 source("R/temporalVarGuid1.r")
 
-# Example: AR(1) mean + GARCH(1,1) variance
+# Example: AR(1) mean + GARCH(1,1) variance with covariates
 fit <- lmvt(
   df,
   p = 1,                    # AR order in mean
-  q = 0,                    # Distributed-lag order for X
+  q = 0,                    # Distributed-lag order for X (in both mean and variance)
   r = 1,                    # ARCH order in variance
   s_ord = 1,                # GARCH order in variance
-  lambda_beta  = 0.01,      # Penalty for mean coefficients
-  lambda_gamma = 0.01,      # Penalty for variance coefficients
+  lambda_beta  = 0.01,      # Penalty for mean coefficients {beta_j}
+  lambda_gamma = 0.01,      # Penalty for variance coefficients {gamma_m}
   standardize_X = TRUE,     # Standardize predictors
   use_x_in_variance = TRUE  # Include X in variance equation
 )

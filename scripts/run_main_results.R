@@ -129,7 +129,7 @@ evaluate_ABCD_fixed_once <- function(
 # --------- run replications (per T) ---------
 run_for_T <- function(Tval,
                       n_reps = 30,
-                      seed_base = 20251111,
+                      seed_base = 20000422,
                       S=15, L=20, d_noise=100,
                       thr_probs=c(0.60,0.70,0.80,0.90,0.95),
                       noise_kind = "ar1") {
@@ -155,12 +155,12 @@ run_for_T <- function(Tval,
 out_dir <- file.path(repo_root, "outputs")
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
-res120 <- run_for_T(Tval = 120, n_reps = 30)
-res240 <- run_for_T(Tval = 240, n_reps = 30)
+res120 <- run_for_T(Tval = 120, n_reps = 100)
+res240 <- run_for_T(Tval = 240, n_reps = 100)
 
 # save raw
-write.csv(res120, file.path(out_dir, "rep_raw_s15t120_by_rep_30reps.csv"), row.names = FALSE)
-write.csv(res240, file.path(out_dir, "rep_raw_s15t240_by_rep_30reps.csv"), row.names = FALSE)
+write.csv(res120, file.path(out_dir, "rep_raw_s15t120_by_rep_100reps.csv"), row.names = FALSE)
+write.csv(res240, file.path(out_dir, "rep_raw_s15t240_by_rep_100reps.csv"), row.names = FALSE)
 
 # ===== figures: boxplots (facets = scenarios; x = A/B/C/D) =====
 plot_block <- function(df_raw, kind = c("RMSE","Bias"), Tval) {

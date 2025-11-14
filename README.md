@@ -24,7 +24,7 @@ Minimal, reproducible code for a variance-guided penalized model with autoregres
 This repository implements a panel data model that simultaneously estimates:
 - **Conditional mean** with autoregressive dynamics and distributed-lag effects
 - **Conditional variance** with ARCH/GARCH dynamics and optional covariate effects
-- **Individualized risk predictions** for exceedance probabilities
+- **Individualized risk assessment** for exceedance probabilities
 
 The model is particularly suited for wearable sensor data and other high-frequency panel applications.
 

@@ -1,6 +1,6 @@
-# Variance-Aware Penalized Panel Modeling for Individualized Risk Prediction
+# Variance-Aware Penalized Panel Modeling for Personalized Risk Assessment from Wearable Sensor Data
 
-Minimal, reproducible code for a variance-guided mean–variance model with autoregressive dynamics for panel data. This repository provides tools for individualized risk prediction using time-series panel models with both mean and variance modeling.
+Minimal, reproducible code for a variance-guided penalized model with autoregressive dynamics for panel data. This repository provides tools for individualized risk assessment using time-series panel models with both mean and variance modeling.
 
 ---
 

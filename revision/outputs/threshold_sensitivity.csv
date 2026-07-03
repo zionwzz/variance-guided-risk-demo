@@ -1,0 +1,5 @@
+threshold_rule,AUC_stress
+full-timeframe q0.70,0.9360474866498963
+burn-in first 20% q0.70,0.8761684099033495
+burn-in first 30% q0.70,0.8864645394765877
+baseline-window q0.70,0.870014122423761

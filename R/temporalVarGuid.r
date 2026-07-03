@@ -16,33 +16,78 @@ lmvt <- function(data,
                  lambda_beta = 0, lambda_gamma = 0,
                  maxit = 200, tol = 1e-4,
                  standardize_X = TRUE,
-                 use_x_in_variance = TRUE,  # <--- NEW
-                 phi_cap = 0.995,           # cap on sum(a)+sum(b)
+                 use_x_in_variance = TRUE,
+                 phi_cap = 0.995,
                  omega_min = 1e-6, omega_cap_mult = 10,
-                 gamma_steps = 8,           # inner prox steps per outer iter
-                 gamma_step = 1e-3,         # prox step size for gamma
+                 gamma_steps = 8,         # kept for compatibility
+                 gamma_step = 1e-3,       # kept for compatibility
                  verbose = FALSE) {
+  
+  # ============================================================
+  # If X is NOT used in variance, use original single-stage
+  # ============================================================
+  if (!use_x_in_variance) {
+    return(lmvt_original_singlestage(data, p, q, r, s_ord, lambda_beta, lambda_gamma,
+                                     maxit, tol, standardize_X, use_x_in_variance,
+                                     phi_cap, omega_min, omega_cap_mult,
+                                     gamma_steps, gamma_step, verbose))
+  }
+  
+  # ============================================================
+  # TWO-STAGE ESTIMATION (when use_x_in_variance = TRUE)
+  # ============================================================
+  if (verbose) cat("Using two-stage estimation for variance model with X...\n\n")
+  
+  # ============================================================
+  # STAGE 1: Fit without X in variance
+  # ============================================================
+  if (verbose) cat("Stage 1: Estimating mean + ARCH/GARCH (no X in variance)...\n")
+  
+  fit_stage1 <- lmvt_original_singlestage(
+    data = data, p = p, q = q, r = r, s_ord = s_ord,
+    lambda_beta = lambda_beta,
+    lambda_gamma = 0,
+    use_x_in_variance = FALSE,  # KEY: no X in variance for stage 1
+    standardize_X = standardize_X,
+    maxit = maxit, tol = tol,
+    phi_cap = phi_cap, omega_min = omega_min, omega_cap_mult = omega_cap_mult,
+    gamma_steps = gamma_steps, gamma_step = gamma_step,
+    verbose = verbose
+  )
+  
+  if (verbose) {
+    cat("\nStage 1 complete:\n")
+    cat(sprintf("  theta = %.4f, beta[1] = %.4f\n", 
+                if(length(fit_stage1$theta)) fit_stage1$theta[1] else 0,
+                fit_stage1$beta[1]))
+    cat(sprintf("  a = %.4f, b = %.4f, mean(omega) = %.4f\n\n",
+                if(length(fit_stage1$a)) fit_stage1$a else 0,
+                if(length(fit_stage1$b)) fit_stage1$b else 0,
+                mean(fit_stage1$omega)))
+  }
+  
+  # ============================================================
+  # STAGE 2: Estimate gamma from residual variance
+  # ============================================================
+  if (verbose) cat("Stage 2: Estimating gamma from residual variance...\n")
   
   stopifnot(all(c("s","t","y") %in% names(data)))
   data <- data[order(data$s, data$t), ]
-  ids <- sort(unique(data$s)); S <- length(ids)
+  ids <- fit_stage1$ids
+  S <- length(ids)
   n <- nrow(data)
   
-  # --- autodetect and (optionally) standardize X ---
-  xcols <- setdiff(names(data), c("s","t","y"))
-  if (length(xcols) == 0) stop("No covariates: provide columns beyond s,t,y.")
+  # Reconstruct X
+  xcols <- fit_stage1$xcols
   Xraw <- data.matrix(data[, xcols, drop = FALSE])
-  if (standardize_X) {
-    x_center <- colMeans(Xraw, na.rm = TRUE)
-    x_scale  <- apply(Xraw,  2, sd, na.rm = TRUE); x_scale[!is.finite(x_scale) | x_scale == 0] <- 1
-    X <- scale(Xraw, center = x_center, scale = x_scale)
+  if (fit_stage1$standardize_X) {
+    X <- scale(Xraw, center = fit_stage1$x_center, scale = fit_stage1$x_scale)
   } else {
-    x_center <- rep(0, ncol(Xraw)); x_scale <- rep(1, ncol(Xraw)); X <- Xraw
+    X <- Xraw
   }
-  P <- ncol(X)
   Y <- as.numeric(data$y)
   
-  # --- lag helper within subject ---
+  # Lag helper
   lag_by_id <- function(v, L) {
     out <- rep(NA_real_, length(v))
     for (id in ids) {
@@ -54,12 +99,173 @@ lmvt <- function(data,
     out
   }
   
-  # --- mean-side lags ---
+  # Create lags
+  Ylags <- if (p > 0) do.call(cbind, lapply(1:p, function(L) lag_by_id(Y, L))) else NULL
+  Xlags_list <- lapply(0:q, function(L) if (L == 0) X else apply(X, 2, lag_by_id, L = L))
+  Xmean <- do.call(cbind, Xlags_list)
+  Xvar <- Xmean
+  
+  # Get residuals from stage 1
+  AR_part <- if (p > 0) as.numeric(Ylags %*% fit_stage1$theta) else 0
+  X_part <- as.numeric(Xmean %*% fit_stage1$beta)
+  mu_stage1 <- fit_stage1$alpha[match(data$s, ids)] + AR_part + X_part
+  eps <- Y - mu_stage1
+  eps[!is.finite(eps)] <- 0
+  
+  # Reconstruct sigma2 from stage 1
+  sigma2_stage1 <- rep(NA_real_, n)
+  
+  make_var_lags <- function(eps, sigma2) {
+    E2lags <- if (r > 0) do.call(cbind, lapply(1:r, function(L) lag_by_id(eps^2, L))) else NULL
+    S2lags <- if (s_ord > 0) do.call(cbind, lapply(1:s_ord, function(L) lag_by_id(sigma2, L))) else NULL
+    list(E2lags = E2lags, S2lags = S2lags)
+  }
+  
+  for (id in ids) {
+    idx <- which(data$s == id)
+    for (ii in seq_along(idx)) {
+      tt <- idx[ii]
+      arch_part <- 0; garch_part <- 0
+      if (r > 0) {
+        for (L in 1:r) {
+          tprev <- which(data$s[idx] == id & data$t[idx] == (data$t[tt] - L))
+          if (length(tprev) == 1) {
+            arch_part <- arch_part + fit_stage1$a[L] * (eps[idx[tprev]]^2)
+          }
+        }
+      }
+      if (s_ord > 0) {
+        for (L in 1:s_ord) {
+          tprev <- which(data$s[idx] == id & data$t[idx] == (data$t[tt] - L))
+          if (length(tprev) == 1) {
+            garch_part <- garch_part + fit_stage1$b[L] * sigma2_stage1[idx[tprev]]
+          }
+        }
+      }
+      sigma2_stage1[tt] <- max(fit_stage1$omega[match(id, ids)] + arch_part + garch_part, 1e-8)
+    }
+  }
+  
+  # Create mask for valid observations
+  VL <- make_var_lags(eps, sigma2_stage1)
+  mask_var <- rep(TRUE, n)
+  if (r > 0) mask_var <- mask_var & (rowSums(is.na(VL$E2lags)) == 0)
+  if (s_ord > 0) mask_var <- mask_var & (rowSums(is.na(VL$S2lags)) == 0)
+  for (LL in 0:q) mask_var <- mask_var & (rowSums(is.na(Xlags_list[[LL+1]])) == 0)
+  mask_var <- mask_var & is.finite(eps) & is.finite(sigma2_stage1)
+  valid_idx <- which(mask_var)
+  
+  # Estimate gamma: regress (eps^2 - sigma2_stage1) on X
+  residual_var <- (eps^2 - sigma2_stage1)[valid_idx]
+  Xvar_valid <- Xvar[valid_idx, , drop = FALSE]
+  
+  # Weighted regression
+  weights <- 1 / pmax(sigma2_stage1[valid_idx], 1e-6)
+  weights <- weights / mean(weights)
+  
+  if (lambda_gamma > 0 && requireNamespace("glmnet", quietly = TRUE)) {
+    if (verbose) cat(sprintf("  Using L1 penalty (lambda_gamma = %.4f)\n", lambda_gamma))
+    Xw <- Xvar_valid * sqrt(weights)
+    yw <- residual_var * sqrt(weights)
+    fit_gamma <- glmnet::glmnet(Xw, yw, family = "gaussian", alpha = 1,
+                                 lambda = lambda_gamma,
+                                 standardize = FALSE, intercept = FALSE)
+    gamma <- as.numeric(as.matrix(glmnet::coef.glmnet(fit_gamma)))[-1]
+  } else {
+    if (verbose) cat("  Using OLS\n")
+    Xw <- Xvar_valid * sqrt(weights)
+    yw <- residual_var * sqrt(weights)
+    XtX <- crossprod(Xw)
+    Xty <- crossprod(Xw, yw)
+    gamma <- tryCatch(
+      as.numeric(solve(XtX, Xty)),
+      error = function(e) as.numeric(solve(XtX + 1e-6*diag(ncol(XtX)), Xty))
+    )
+  }
+  
+  gamma[!is.finite(gamma)] <- 0
+  
+  if (verbose) {
+    cat("\nStage 2 complete:\n")
+    cat(sprintf("  gamma[1:3] = %s\n",
+                paste(round(gamma[1:min(3, length(gamma))], 4), collapse = ", ")))
+    cat(sprintf("  Non-zero gammas: %d / %d\n\n", 
+                sum(abs(gamma) > 1e-3), length(gamma)))
+  }
+  
+  # Return model (same structure as original)
+  structure(list(
+    call = match.call(),
+    orders = list(p = p, q = q, r = r, s = s_ord),
+    ids = ids,
+    alpha = fit_stage1$alpha,
+    theta = fit_stage1$theta,
+    beta = fit_stage1$beta,
+    omega = fit_stage1$omega,
+    a = fit_stage1$a,
+    b = fit_stage1$b,
+    gamma = gamma,
+    xcols = xcols,
+    standardize_X = fit_stage1$standardize_X,
+    use_x_in_variance = TRUE,
+    x_center = fit_stage1$x_center,
+    x_scale = fit_stage1$x_scale,
+    converged = fit_stage1$converged,
+    iters = fit_stage1$iters
+  ), class = "lmvt")
+}
+
+
+# ============================================================
+# Helper: Original single-stage algorithm
+# ============================================================
+lmvt_original_singlestage <- function(data,
+                 p = 1, q = 0,
+                 r = 1, s_ord = 1,
+                 lambda_beta = 0, lambda_gamma = 0,
+                 maxit = 200, tol = 1e-4,
+                 standardize_X = TRUE,
+                 use_x_in_variance = TRUE,
+                 phi_cap = 0.995,
+                 omega_min = 1e-6, omega_cap_mult = 10,
+                 gamma_steps = 8,
+                 gamma_step = 1e-3,
+                 verbose = FALSE) {
+  
+  stopifnot(all(c("s","t","y") %in% names(data)))
+  data <- data[order(data$s, data$t), ]
+  ids <- sort(unique(data$s)); S <- length(ids)
+  n <- nrow(data)
+  
+  xcols <- setdiff(names(data), c("s","t","y"))
+  if (length(xcols) == 0) stop("No covariates: provide columns beyond s,t,y.")
+  Xraw <- data.matrix(data[, xcols, drop = FALSE])
+  if (standardize_X) {
+    x_center <- colMeans(Xraw, na.rm = TRUE)
+    x_scale <- apply(Xraw, 2, sd, na.rm = TRUE)
+    x_scale[!is.finite(x_scale) | x_scale == 0] <- 1
+    X <- scale(Xraw, center = x_center, scale = x_scale)
+  } else {
+    x_center <- rep(0, ncol(Xraw)); x_scale <- rep(1, ncol(Xraw)); X <- Xraw
+  }
+  P <- ncol(X)
+  Y <- as.numeric(data$y)
+  
+  lag_by_id <- function(v, L) {
+    out <- rep(NA_real_, length(v))
+    for (id in ids) {
+      idx <- which(data$s == id)
+      if (L <= 0) out[idx] <- v[idx] else if (length(idx) > L) {
+        out[idx[(L+1):length(idx)]] <- v[idx[1:(length(idx)-L)]]
+      }
+    }
+    out
+  }
+  
   Ylags <- if (p > 0) do.call(cbind, lapply(1:p, function(L) lag_by_id(Y, L))) else NULL
   Xlags_list_mean <- lapply(0:q, function(L) if (L == 0) X else apply(X, 2, lag_by_id, L = L))
   Xmean <- do.call(cbind, Xlags_list_mean)
   
-  # --- variance-side design: include X or not ---
   if (use_x_in_variance) {
     Xlags_list_var <- Xlags_list_mean
     Xvar <- Xmean
@@ -68,37 +274,35 @@ lmvt <- function(data,
     Xlags_list_var <- list(matrix(0, nrow(data), 0))
     Xvar <- matrix(0, nrow(data), 0)
     gamma <- numeric(0)
-    lambda_gamma <- 0   # irrelevant when gamma is not used
+    lambda_gamma <- 0
   }
   
-  # --- mask for complete rows in mean block ---
   mask_mean <- rep(TRUE, n)
-  if (p > 0)  mask_mean <- mask_mean & (rowSums(is.na(Ylags)) == 0)
+  if (p > 0) mask_mean <- mask_mean & (rowSums(is.na(Ylags)) == 0)
   for (LL in 0:q) mask_mean <- mask_mean & (rowSums(is.na(Xlags_list_mean[[LL+1]])) == 0)
   
-  # --- initialize parameters ---
   vl <- stats::var(Y, na.rm = TRUE); vl <- ifelse(is.finite(vl) && vl > 0, vl, 1)
-  alpha <- tapply(Y, data$s, function(z) mean(z, na.rm = TRUE)); alpha[is.na(alpha)] <- 0
+  alpha <- tapply(Y, data$s, function(z) mean(z, na.rm = TRUE))
+  alpha[is.na(alpha)] <- 0
   alpha <- as.numeric(alpha); names(alpha) <- ids
   omega <- rep(max(omega_min, vl/10), S); names(omega) <- ids
   theta <- if (p > 0) rep(0, p) else numeric(0)
-  beta  <- rep(0, (q+1)*P)
+  beta <- rep(0, (q+1)*P)
   a <- if (r > 0) rep(0.05, r) else numeric(0)
   b <- if (s_ord > 0) rep((phi_cap-0.1)/max(1, s_ord), s_ord) else numeric(0)
   
-  # initial eps/sigma2
   mu <- alpha[match(data$s, ids)] +
     (if (p > 0) rowSums((Ylags*0), na.rm = TRUE) else 0) +
     as.numeric(Xmean %*% beta)
   eps <- Y - mu; eps[!is.finite(eps)] <- 0
   sigma2 <- rep(max(vl, 1e-2), n)
   
-  # --- helpers for variance lags & projections ---
   make_var_lags <- function(eps, sigma2){
     E2lags <- if (r > 0) do.call(cbind, lapply(1:r, function(L) lag_by_id(eps^2, L))) else NULL
     S2lags <- if (s_ord > 0) do.call(cbind, lapply(1:s_ord, function(L) lag_by_id(sigma2, L))) else NULL
     list(E2lags = E2lags, S2lags = S2lags)
   }
+  
   proj_ab <- function(a, b, cap = phi_cap) {
     a <- pmax(a, 0); b <- pmax(b, 0)
     s <- sum(a) + sum(b)
@@ -106,7 +310,6 @@ lmvt <- function(data,
     list(a=a, b=b)
   }
   
-  # SAFE objective for (omega,a,b) with gamma fixed; evaluate only on valid_idx
   var_obj_abw <- function(par, eps, ids, s_idx, E2lags, S2lags, Xvar,
                           gamma, phi_cap, omega_min, omega_max, valid_idx) {
     BIG <- 1e50
@@ -144,22 +347,12 @@ lmvt <- function(data,
     val
   }
   
-  ### TIMING: allocate vectors for per-iteration times -----------------------
-  mean_times <- numeric(maxit)   # time spent in mean-update block
-  var_times  <- numeric(maxit)   # time spent in variance/gamma/sigma2 block
-  iter_times <- numeric(maxit)   # entire outer loop iteration time
-  
   obj_prev <- Inf
   for (k in 1:maxit) {
     
-    iter_start <- proc.time()[["elapsed"]]   # whole-iteration start
-    
-    # ===== (A) mean block =====
-    mean_start <- proc.time()[["elapsed"]]   # --- TIMING: mean block start
-    
     w <- 1 / pmax(sigma2, 1e-10)
     AR_part <- if (p > 0) rowSums(Ylags %*% matrix(theta, ncol = 1)) else 0
-    X_part  <- as.numeric(Xmean %*% beta)
+    X_part <- as.numeric(Xmean %*% beta)
     numer <- tapply(w * (Y - AR_part - X_part), data$s, sum, na.rm = TRUE)
     denom <- tapply(w, data$s, sum, na.rm = TRUE)
     alpha <- as.numeric(numer / pmax(denom, 1e-12)); names(alpha) <- ids
@@ -174,7 +367,7 @@ lmvt <- function(data,
     
     if (lambda_beta > 0) {
       if (!requireNamespace("glmnet", quietly = TRUE))
-        stop("Install 'glmnet' for penalized mean block (lambda_beta>0).")
+        stop("Install 'glmnet' for penalized mean block.")
       pen_vec <- c(rep(0, p), rep(1, ncol(Xmean)))
       gfit <- glmnet::glmnet(Xw, yw, family="gaussian", alpha=1, lambda=lambda_beta,
                              penalty.factor=pen_vec, standardize=FALSE, intercept=FALSE)
@@ -187,26 +380,20 @@ lmvt <- function(data,
     if (p > 0) { theta <- coef_all[1:p]; beta <- coef_all[(p+1):length(coef_all)] } else beta <- coef_all
     
     AR_part <- if (p > 0) rowSums(Ylags %*% matrix(theta, ncol = 1)) else 0
-    X_part  <- as.numeric(Xmean %*% beta)
+    X_part <- as.numeric(Xmean %*% beta)
     mu <- alpha[match(data$s, ids)] + AR_part + X_part
     eps <- Y - mu; eps[!is.finite(eps)] <- 0
     
-    mean_times[k] <- proc.time()[["elapsed"]] - mean_start   # --- TIMING: mean done
-    
-    # ===== Build strict variance mask =====
-    var_start <- proc.time()[["elapsed"]]                    # --- TIMING: var start
-    
     VL <- make_var_lags(eps, sigma2); E2lags <- VL$E2lags; S2lags <- VL$S2lags
     mask_var <- rep(TRUE, n)
-    if (r > 0)    mask_var <- mask_var & (rowSums(is.na(E2lags)) == 0)
-    if (s_ord > 0)mask_var <- mask_var & (rowSums(is.na(S2lags)) == 0)
+    if (r > 0) mask_var <- mask_var & (rowSums(is.na(E2lags)) == 0)
+    if (s_ord > 0) mask_var <- mask_var & (rowSums(is.na(S2lags)) == 0)
     if (use_x_in_variance) {
       for (LL in 0:q) mask_var <- mask_var & (rowSums(is.na(Xlags_list_var[[LL+1]])) == 0)
     }
     valid_idx <- which(mask_var & is.finite(eps))
-    if (!length(valid_idx)) stop("No valid rows for variance update; check lags/orders.")
+    if (!length(valid_idx)) stop("No valid rows for variance update.")
     
-    # ===== (B1) optimize (omega,a,b) with gamma fixed =====
     s_idx <- match(data$s, ids)
     omega_cap <- max(omega_cap_mult * stats::median(eps^2, na.rm = TRUE), omega_min*10)
     par0 <- c(omega, if (r>0) a, if (s_ord>0) b)
@@ -228,71 +415,37 @@ lmvt <- function(data,
     if (s_ord>0) { off <- S + if (r>0) r else 0; b <- par_star[(off+1):(off+s_ord)] }
     abp <- proj_ab(a, b, phi_cap); a <- abp$a; b <- abp$b
     
-    # ===== (B2) update gamma with delta fixed (prox-grad on valid_idx) =====
     delta <- omega[s_idx] +
       if (r>0) as.numeric(E2lags %*% a) else 0 +
       if (s_ord>0) as.numeric(S2lags %*% b) else 0
     
     if (use_x_in_variance && length(gamma)) {
-      v <- valid_idx
-      u_floor <- 1e-8  # tiny floor to ensure strict positivity on valid_idx
-      
       for (gi in 1:max(1, gamma_steps)) {
         u <- delta + as.numeric(Xvar %*% gamma)
+        v <- valid_idx
         uv <- u[v]
         step <- gamma_step
-        
         for (bt in 0:8) {
-          if (any(!is.finite(uv)) || any(uv <= u_floor)) {
-            shrink <- 1.0
-            repeat {
-              gamma_test <- gamma * shrink
-              uv_test <- delta[v] + as.numeric(Xvar[v, ] %*% gamma_test)
-              if (all(is.finite(uv_test)) && all(uv_test > u_floor)) {
-                gamma <- gamma_test
-                uv <- uv_test
-                break
-              }
-              shrink <- shrink * 0.5
-              if (shrink < 1e-6) {
-                gamma <- 0*gamma
-                uv <- delta[v]  
-                break
-              }
-            }
-            step <- step * 0.5  
+          if (any(!is.finite(uv)) || any(uv <= 0)) { 
+            step <- step * 0.5
+            uv <- delta[v] + as.numeric(Xvar[v,] %*% gamma)
+            next 
           }
-          
           g_u <- (1/uv - (eps[v]^2)/(uv^2))
           grad_gam <- as.numeric(crossprod(Xvar[v, , drop=FALSE], g_u))
           gamma_try <- gamma - step * grad_gam
           if (lambda_gamma > 0) gamma_try <- sign(gamma_try) * pmax(abs(gamma_try) - step*lambda_gamma, 0)
-          
           u_try <- delta[v] + as.numeric(Xvar[v, ] %*% gamma_try)
-          if (any(!is.finite(u_try)) || any(u_try <= u_floor)) { step <- step * 0.5; next }
-          
+          if (any(!is.finite(u_try)) || any(u_try <= 0)) { step <- step * 0.5; next }
           obj_now <- sum(log(uv) + (eps[v]^2)/uv)
           obj_try <- sum(log(u_try) + (eps[v]^2)/u_try)
           if (is.finite(obj_try) && obj_try <= obj_now) { gamma <- gamma_try; break } else { step <- step * 0.5 }
         }
       }
-      
-      uv_final <- delta[v] + as.numeric(Xvar[v, ] %*% gamma)
-      if (any(!is.finite(uv_final)) || any(uv_final <= u_floor)) {
-        shrink <- 1.0
-        repeat {
-          gamma_test <- gamma * shrink
-          uv_test <- delta[v] + as.numeric(Xvar[v, ] %*% gamma_test)
-          if (all(is.finite(uv_test)) && all(uv_test > u_floor)) { gamma <- gamma_test; break }
-          shrink <- shrink * 0.5
-          if (shrink < 1e-6) { gamma <- 0*gamma; break }
-        }
-      }
     } else {
-      gamma <- numeric(0)  # fixed zero if X excluded from variance
+      gamma <- numeric(0)
     }
     
-    # ===== (C) forward sigma^2 recursion =====
     sigma2_new <- rep(NA_real_, n)
     for (id in ids) {
       idx <- which(data$s == id)
@@ -319,29 +472,14 @@ lmvt <- function(data,
     }
     sigma2 <- sigma2_new
     
-    var_times[k] <- proc.time()[["elapsed"]] - var_start   # --- TIMING: var done
-    
-    # monitor (valid_idx only)
     u_now <- delta[valid_idx] + if (length(gamma)) as.numeric(Xvar[valid_idx, ] %*% gamma) else 0
     obj_now <- sum(log(u_now) + (eps[valid_idx]^2)/u_now)
-    
-    iter_times[k] <- proc.time()[["elapsed"]] - iter_start # --- TIMING: whole iter
-    
-    if (verbose) cat(sprintf(
-      "iter %d: obj=%s  sum(a)+sum(b)=%.4f  mean(omega)=%.4f  t_mean=%.4fs  t_var=%.4fs\n",
-      k, format(obj_now, digits=6), sum(a)+sum(b), mean(omega),
-      mean_times[k], var_times[k]
-    ))
-    
+    if (verbose) cat(sprintf("iter %d: obj=%s  sum(a)+sum(b)=%.4f  mean(omega)=%.4f\n",
+                             k, format(obj_now, digits=6), sum(a)+sum(b), mean(omega)))
     if (!is.finite(obj_now)) break
     if (abs(obj_prev - obj_now) < tol) break
     obj_prev <- obj_now
   }
-  
-  iters_used <- k
-  mean_times <- mean_times[seq_len(iters_used)]
-  var_times  <- var_times[seq_len(iters_used)]
-  iter_times <- iter_times[seq_len(iters_used)]
   
   structure(list(
     call = match.call(),
@@ -351,15 +489,11 @@ lmvt <- function(data,
     omega = omega, a = a, b = b, gamma = gamma,
     xcols = xcols,
     standardize_X = standardize_X,
-    use_x_in_variance = use_x_in_variance,  # <--- stored
+    use_x_in_variance = use_x_in_variance,
     x_center = x_center, x_scale = x_scale,
-    converged = (iters_used < maxit), iters = iters_used,
-    mean_times = mean_times,   # <--- NEW
-    var_times  = var_times,    # <--- NEW
-    iter_times = iter_times    # <--- NEW
+    converged = (k < maxit), iters = k
   ), class = "lmvt")
 }
-
 
 # ============================================================
 # predict.lmvt(): conditional mean, variance, exceedance risks
@@ -371,66 +505,6 @@ predict.lmvt <- function(object, newdata, threshold,
   stopifnot(all(c("s","t","y") %in% names(newdata)))
   newdata <- newdata[order(newdata$s, newdata$t), ]
   ids <- object$ids
-  
-  # guard: unseen subjects
-  unseen <- setdiff(unique(newdata$s), ids)
-  if (length(unseen)) {
-    stop(sprintf("predict.lmvt: newdata contains unseen subject IDs: %s",
-                 paste(unseen, collapse = ", ")))
-  }
-  
-  # ---- resolve thresholds to per-row vector ----
-  resolve_threshold <- function(threshold, new_s, train_ids) {
-    n <- length(new_s)
-    # 1) single fixed threshold
-    if (length(threshold) == 1L) {
-      thr <- rep(as.numeric(threshold), n)
-      if (!all(is.finite(thr))) stop("Non-finite threshold.")
-      return(thr)
-    }
-    # 2) per-row vector (length == nrow(newdata))
-    if (length(threshold) == n) {
-      thr <- as.numeric(threshold)
-      if (any(!is.finite(thr))) stop("Non-finite values in threshold vector.")
-      return(thr)
-    }
-    # 3) per-subject vector (preferred). Use names if provided; otherwise infer order.
-    if (!is.null(names(threshold))) {
-      # treat names as character keys (robust to numeric IDs stored as chars)
-      thr_map <- setNames(as.numeric(threshold), as.character(names(threshold)))
-      thr <- thr_map[as.character(new_s)]
-      if (any(is.na(thr))) {
-        missing_ids <- unique(new_s[is.na(thr)])
-        stop(sprintf("Thresholds missing for subjects: %s",
-                     paste(missing_ids, collapse = ", ")))
-      }
-      if (any(!is.finite(thr))) stop("Non-finite values in named threshold vector.")
-      return(thr)
-    } else {
-      # no names: try matching by subject set size
-      new_ids_unique <- unique(new_s)
-      if (length(threshold) == length(new_ids_unique)) {
-        thr_map <- setNames(as.numeric(threshold), as.character(new_ids_unique))
-        thr <- thr_map[as.character(new_s)]
-        if (any(!is.finite(thr))) stop("Non-finite values in per-subject threshold vector.")
-        return(thr)
-      }
-      if (length(threshold) == length(train_ids)) {
-        thr_map <- setNames(as.numeric(threshold), as.character(train_ids))
-        thr <- thr_map[as.character(new_s)]
-        if (any(is.na(thr))) {
-          missing_ids <- unique(new_s[is.na(thr)])
-          stop(sprintf("Thresholds (aligned to training IDs) missing for subjects: %s",
-                       paste(missing_ids, collapse = ", ")))
-        }
-        if (any(!is.finite(thr))) stop("Non-finite values in per-subject threshold vector.")
-        return(thr)
-      }
-      stop("`threshold` must be: length 1; length nrow(newdata); or a per-subject vector whose length equals the number of subjects (in newdata or in training). Provide names(threshold) = subject IDs to be explicit.")
-    }
-  }
-  
-  thr_per_row <- resolve_threshold(threshold, newdata$s, ids)
   
   # align covariates exactly like training
   Xraw <- matrix(0, nrow = nrow(newdata), ncol = length(object$xcols))
@@ -474,20 +548,17 @@ predict.lmvt <- function(object, newdata, threshold,
   }
   
   # conditional mean & residuals
-  AR_part <- if (p > 0) rowSums(Ylags %*% matrix(object$theta, ncol = 1), na.rm = TRUE) else 0
+  AR_part <- if (p > 0) rowSums(Ylags %*% matrix(object$theta, ncol=1), na.rm=TRUE) else 0
   X_part  <- as.numeric(Xmean %*% object$beta)
   muhat   <- object$alpha[match(newdata$s, ids)] + AR_part + X_part
   eps_hat <- Y - muhat; eps_hat[!is.finite(eps_hat)] <- 0
   
-  # forward variance recursion with feasibility repair
-  u_floor <- 1e-8
+  # forward variance recursion
   sigma2 <- rep(NA_real_, nrow(newdata))
   for (id in ids) {
     idx <- which(newdata$s == id)
     for (ii in seq_along(idx)) {
       tt <- idx[ii]
-      
-      # ARCH/GARCH parts using available lags within subject
       arch_part <- 0; garch_part <- 0
       if (r > 0) {
         for (L in 1:r) {
@@ -501,40 +572,17 @@ predict.lmvt <- function(object, newdata, threshold,
           if (length(tprev) == 1) garch_part <- garch_part + object$b[L] * sigma2[idx[tprev]]
         }
       }
-      
-      # variance linear predictor
-      u0 <- object$omega[match(id, ids)] + arch_part + garch_part
       xrow_var <- if (ncol(Xvar)) Xvar[tt, ] else numeric(0)
-      xg <- if (length(object$gamma)) sum(object$gamma * xrow_var) else 0
-      vlin <- u0 + xg
-      
-      # Feasibility repair (prediction-time analogue of training B2 guards)
-      if (!is.finite(vlin) || vlin <= u_floor) {
-        if (is.finite(xg) && xg < 0) {
-          s <- (u_floor - u0) / xg  # xg < 0
-          s <- min(1, max(0, s))
-          vlin_try <- u0 + s * xg
-          if (is.finite(vlin_try) && vlin_try > u_floor) {
-            vlin <- vlin_try
-          } else {
-            vlin <- max(u0, u_floor)
-          }
-        } else {
-          vlin <- max(u0, u_floor)
-        }
-      }
-      
-      sigma2[tt] <- vlin
+      vlin <- object$omega[match(id, ids)] + arch_part + garch_part +
+        if (length(object$gamma)) sum(object$gamma * xrow_var) else 0
+      sigma2[tt] <- max(vlin, 1e-8)
     }
   }
   
-  sigmahat <- sqrt(pmax(sigma2, u_floor))
-  yhat <- muhat
-  z <- (thr_per_row - muhat) / sigmahat
-  
+  sigmahat <- sqrt(sigma2); yhat <- muhat
+  z <- (threshold - muhat)/sigmahat
   out <- data.frame(s = newdata$s, t = newdata$t,
-                    yhat = yhat, muhat = muhat, sigmahat = sigmahat,
-                    threshold_used = thr_per_row)
+                    yhat = yhat, muhat = muhat, sigmahat = sigmahat)
   if (innov_g) out$risk_g <- 1 - pnorm(z)
   if (innov_t) out$risk_t <- 1 - pt(z, df = df_t)
   out

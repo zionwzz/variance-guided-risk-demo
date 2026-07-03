@@ -6,9 +6,9 @@ repo_root <- getwd()
 r_dir <- file.path(repo_root, "R")
 stopifnot(dir.exists(r_dir),
           file.exists(file.path(r_dir, "simulator_scenarios.r")),
-          file.exists(file.path(r_dir, "temporalVarGuid1.r")))
+          file.exists(file.path(r_dir, "temporalVarGuid.r")))
 source(file.path(r_dir, "simulator_scenarios.r"))
-source(file.path(r_dir, "temporalVarGuid1.r"))
+source(file.path(r_dir, "temporalVarGuid.r"))
 
 # --------- helpers ---------
 `%||%` <- function(x, y) if (is.null(x)) y else x

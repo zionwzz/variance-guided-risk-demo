@@ -1,0 +1,4 @@
+"classifier","AUC_features_only","AUC_features_plus_resid"
+"Logistic",0.931,0.93
+"Random forest",0.928,0.924
+"GBM",0.945,0.946
